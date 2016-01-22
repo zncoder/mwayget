@@ -19,12 +19,13 @@ import (
 var (
 	blockSize = flag.Int64("b", 1024*1024, "block size")
 	numBlocks = flag.Int("n", 10, "number of concurrent blocks")
-	cont     = flag.Bool("c", false, "continue")
-	filename = flag.String("o", "", "output filename. the last part of the url is used if not set.")
-	urlPath  = flag.String("u", "", "url")
-	verbose  = flag.Bool("v", false, "verbose")
+	cont      = flag.Bool("c", false, "continue")
+	filename  = flag.String("o", "", "output filename. the last part of the url is used if not set.")
+	urlPath   = flag.String("u", "", "url")
+	verbose   = flag.Bool("v", false, "verbose")
 
 	ur *url.URL
+	c  = http.Client{Timeout: 5 * time.Minute}
 )
 
 func lg(format string, arg ...interface{}) {
@@ -54,7 +55,6 @@ type downloader struct {
 }
 
 // TODO:
-//  - filename can be from the Content-Disposition of the http resp
 //  - support cookies
 
 func main() {
@@ -64,16 +64,9 @@ func main() {
 	if ur, err = url.Parse(*urlPath); err != nil {
 		log.Fatalf("invalid url=%s err=%v", *urlPath, err)
 	}
-	*filename = getFilename()
-	file := openFile()
-	size := getFileSize(file)
 
-	dl := downloader{
-		file:      file,
-		committed: size,
-		offset:    size,
-	}
-	lg("dl starts with committed=%d", dl.committed)
+	dl := NewDownloader()
+	lg("dl starts with filename=%s committed=%d total=%d", *filename, dl.committed, dl.total)
 
 	var wg sync.WaitGroup
 	wg.Add(*numBlocks)
@@ -126,10 +119,6 @@ func getFileSize(file *os.File) int64 {
 }
 
 func (dl *downloader) Run() error {
-	c := http.Client{
-		Timeout: 5 * time.Minute,
-	}
-
 	req := http.Request{
 		URL:    ur,
 		Header: make(http.Header),
@@ -282,4 +271,69 @@ func (dl *downloader) setTotal(total int64) {
 	case dl.total != total:
 		log.Fatalf("total changed from %d to %d", dl.total, total)
 	}
+}
+
+func NewDownloader() *downloader {
+	sfn, total, err := queryURL()
+	if err != nil {
+		log.Fatalf("head url=%v err=%v", ur, err)
+	}
+
+	var committed int64
+	*filename = getFilename()
+	fi, err := os.Stat(*filename)
+	if err != nil {
+		// file does not exist
+		if sfn != "" {
+			*filename = sfn
+		}
+		*cont = false
+	} else if *cont {
+		committed = fi.Size()
+	}
+
+	return &downloader{
+		file:      openFile(),
+		committed: committed,
+		offset:    committed,
+		total:     total,
+	}
+}
+
+func queryURL() (fn string, total int64, err error) {
+	req := http.Request{
+		Method: "HEAD",
+		URL:    ur,
+	}
+	resp, err := c.Do(&req)
+	if err != nil {
+		return "", 0, fmt.Errorf("head url=%v err=%v", ur, err)
+	}
+	if resp.StatusCode != 200 {
+		return "", 0, fmt.Errorf("bad response status=%s", resp.Status)
+	}
+
+	total = resp.ContentLength
+	if total < 0 {
+		// TODO: total probably should be -1
+		total = 0
+	}
+
+	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
+		fn = parseContentDisposition(cd)
+	}
+	return fn, total, nil
+}
+
+func parseContentDisposition(cd string) string {
+	tok := `filename="`
+	i := strings.Index(cd, tok)
+	if i < 0 {
+		return ""
+	}
+	i += len(tok)
+	if !strings.HasSuffix(cd, `"`) {
+		return ""
+	}
+	return cd[i : len(cd)-1]
 }
