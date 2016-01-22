@@ -185,6 +185,7 @@ func (dl *downloader) Run() error {
 }
 
 func (dl *downloader) advanceCommit(rh string) {
+	begin := dl.committed
 	sort.Sort(offsetRangeSlice(dl.copied))
 	lg("copied=%v", dl.copied)
 	i := 0
@@ -201,6 +202,9 @@ func (dl *downloader) advanceCommit(rh string) {
 		break
 	}
 	dl.copied = dl.copied[i:]
+	if dl.committed > begin {
+		log.Printf("advance committed to %d", dl.committed)
+	}
 }
 
 func (dl *downloader) setErr(err error) {
