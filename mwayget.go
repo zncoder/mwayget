@@ -87,15 +87,19 @@ func main() {
 	}
 }
 
-func getFilename() string {
-	if *filename != "" {
+func getFilename(sfn string) string {
+	switch {
+	case *filename != "":
 		return *filename
+	case sfn != "":
+		return sfn
+	default:
+		_, fn := filepath.Split(ur.Path)
+		if fn == "" {
+			log.Fatalf("cannot derive file name from url path=%s", ur.Path)
+		}
+		return fn
 	}
-	_, fn := filepath.Split(ur.Path)
-	if fn == "" {
-		log.Fatalf("cannot derive file name from url path=%s", ur.Path)
-	}
-	return fn
 }
 
 func openFile() *os.File {
@@ -291,13 +295,10 @@ func NewDownloader() *downloader {
 	}
 
 	var committed int64
-	*filename = getFilename()
+	*filename = getFilename(sfn)
 	fi, err := os.Stat(*filename)
 	if err != nil {
 		// file does not exist
-		if sfn != "" {
-			*filename = sfn
-		}
 		*cont = false
 	} else if *cont {
 		committed = fi.Size()
