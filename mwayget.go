@@ -289,7 +289,6 @@ func NewDownloader() *downloader {
 	if err != nil {
 		log.Fatalf("head url=%v err=%v", ur, err)
 	}
-	log.Printf("filename=%s total=%d", sfn, total)
 
 	var committed int64
 	*filename = getFilename()
@@ -303,6 +302,7 @@ func NewDownloader() *downloader {
 	} else if *cont {
 		committed = fi.Size()
 	}
+	log.Printf("start downloader: filename=%s committed=%d total=%d", sfn, committed, total)
 
 	return &downloader{
 		file:      openFile(),
