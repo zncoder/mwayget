@@ -142,18 +142,15 @@ func (dl *downloader) Run() error {
 			return fmt.Errorf("dl reaches end start=%d end=%d", start, end)
 		}
 
-		rh := fmt.Sprintf("bytes=%d-%d", start, end)
-		req.Header.Set("Range", rh)
-		lg("dl %s", rh)
-		resp, err := c.Do(&req)
+		rr, err := doRangeRequest(&req, start, end)
 		if err != nil {
-			// unexpected error
 			err = fmt.Errorf("req of range=%d-%d err=%v", start, end, err)
 			dl.setErr(err)
 			return err
 		}
-		n, total, err := dl.readBody(resp, b, rh)
-		lg("readbody n=%d total=%d err=%v", n, total, err)
+		lg("range resp=%+v", rr)
+
+		n, err := dl.readBody(rr.body, b)
 		if err != nil {
 			err = fmt.Errorf("read body err=%v", err)
 			dl.setErr(err)
@@ -161,6 +158,9 @@ func (dl *downloader) Run() error {
 		}
 		if n == 0 {
 			log.Panicln("readbody returns 0 but no err")
+		}
+		if n != int(rr.end-rr.start+1) {
+			log.Panicf("readbody got=%d/%d-%d want=%d", rr.end-rr.start+1, rr.start, rr.end, n)
 		}
 
 		dl.mu.Lock()
@@ -170,11 +170,11 @@ func (dl *downloader) Run() error {
 		}
 
 		if err == nil {
-			end = start + int64(n) - 1 // actual end
-			dl.setTotal(total)
+			end = rr.end
+			dl.setTotal(rr.total)
 			lg("%d-%d downloaded", start, end)
 			dl.copied = append(dl.copied, offsetRange{start, end})
-			dl.advanceCommit(rh)
+			dl.advanceCommit()
 		}
 		dl.mu.Unlock()
 
@@ -184,7 +184,7 @@ func (dl *downloader) Run() error {
 	}
 }
 
-func (dl *downloader) advanceCommit(rh string) {
+func (dl *downloader) advanceCommit() {
 	begin := dl.committed
 	sort.Sort(offsetRangeSlice(dl.copied))
 	lg("copied=%v", dl.copied)
@@ -193,7 +193,6 @@ func (dl *downloader) advanceCommit(rh string) {
 		r := dl.copied[i]
 		if r.Start == dl.committed {
 			dl.committed = r.End + 1
-			lg("%s advance committed to %d", rh, dl.committed)
 			continue
 		}
 		if r.Start < dl.committed {
@@ -214,39 +213,47 @@ func (dl *downloader) setErr(err error) {
 	}
 }
 
-func (dl *downloader) readBody(resp *http.Response, b []byte, rh string) (n int, total int64, err error) {
-	lg("%s readbody resp=%+v", rh, resp)
-	if (resp.StatusCode / 100) != 2 {
-		return 0, 0, fmt.Errorf("stop because of resp status=%s", resp.Status)
-	}
-
-	cr := resp.Header.Get("Content-Range")
-	if cr != "" {
-		total = parseContentRange(cr)
-	}
-
-	n, err = io.ReadFull(resp.Body, b)
-	resp.Body.Close()
-	lg("%s read body n=%d err=%v", rh, n, err)
+func (dl *downloader) readBody(body io.ReadCloser, b []byte) (int, error) {
+	n, err := io.ReadFull(body, b)
+	body.Close()
 	if err != nil && err != io.ErrUnexpectedEOF {
-		return 0, 0, fmt.Errorf("read body err=%v", err)
+		return 0, fmt.Errorf("read body err=%v", err)
 	}
-	return n, total, nil
+	return n, nil
 }
 
-func parseContentRange(cr string) int64 {
-	i := strings.Index(cr, "/")
+func parseContentRange(cr string) (start, end, total int64, err error) {
+	s := cr
+
+	i := strings.LastIndex(s, " ")
+	if i >= 0 {
+		s = s[i+1:]
+	}
+
+	fs := make([]string, 3)
+	// a-b/c
+	i = strings.Index(s, "-")
 	if i < 0 {
-		lg("invalid content-range=%q, no slash", cr)
-		return 0
+		return 0, 0, 0, fmt.Errorf("malformed Content-Range=%s", cr)
 	}
-	s := cr[i+1:]
-	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		lg("invalid content-range=%q, parse total err=%v", cr, err)
-		return 0
+	fs[0] = s[:i]
+	s = s[i+1:]
+
+	i = strings.Index(s, "/")
+	if i < 0 {
+		return 0, 0, 0, fmt.Errorf("malformed Content-Range=%s", cr)
 	}
-	return n
+	fs[1], fs[2] = s[:i], s[i+1:]
+
+	is := make([]int64, 3)
+	for i, s := range fs {
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return 0, 0, 0, fmt.Errorf("malformed range Content-Range=%s err=%v", cr, err)
+		}
+		is[i] = n
+	}
+	return is[0], is[1], is[2], nil
 }
 
 func firstErr(err ...error) error {
@@ -304,29 +311,52 @@ func NewDownloader() *downloader {
 	}
 }
 
+type rangeResp struct {
+	filename   string
+	start, end int64
+	total      int64
+	body       io.ReadCloser
+}
+
+func doRangeRequest(req *http.Request, start, end int64) (*rangeResp, error) {
+	rh := fmt.Sprintf("bytes=%d-%d", start, end)
+	req.Header.Set("Range", rh)
+	resp, err := c.Do(req)
+	if err != nil {
+		// unexpected error
+		return nil, fmt.Errorf("http do %s err=%v", rh, err)
+	}
+
+	if (resp.StatusCode / 100) != 2 {
+		return nil, fmt.Errorf("bad resp status=%s", resp.Status)
+	}
+
+	rr := &rangeResp{body: resp.Body}
+	if rr.start, rr.end, rr.total, err = parseContentRange(resp.Header.Get("Content-Range")); err != nil {
+		return nil, err
+	}
+	if rr.start != start {
+		return nil, fmt.Errorf("start of range resp want=%d got=%d", start, rr.start)
+	}
+	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
+		rr.filename = parseContentDisposition(cd)
+	}
+	return rr, nil
+}
+
 func queryURL() (fn string, total int64, err error) {
 	req := http.Request{
-		Method: "HEAD",
+		// implement HEAD with GET, which has wider support
+		Method: "GET",
 		URL:    ur,
+		Header: make(http.Header),
 	}
-	resp, err := c.Do(&req)
+
+	rr, err := doRangeRequest(&req, 0, 1)
 	if err != nil {
-		return "", 0, fmt.Errorf("head url=%v err=%v", ur, err)
+		return "", 0, err
 	}
-	if resp.StatusCode != 200 {
-		return "", 0, fmt.Errorf("bad response status=%s", resp.Status)
-	}
-
-	total = resp.ContentLength
-	if total < 0 {
-		// TODO: total probably should be -1
-		total = 0
-	}
-
-	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
-		fn = parseContentDisposition(cd)
-	}
-	return fn, total, nil
+	return rr.filename, rr.total, nil
 }
 
 func parseContentDisposition(cd string) string {
