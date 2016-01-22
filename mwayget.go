@@ -289,6 +289,7 @@ func NewDownloader() *downloader {
 	if err != nil {
 		log.Fatalf("head url=%v err=%v", ur, err)
 	}
+	log.Printf("filename=%s total=%d", sfn, total)
 
 	var committed int64
 	*filename = getFilename()
