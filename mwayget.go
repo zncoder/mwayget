@@ -19,10 +19,10 @@ import (
 var (
 	blockSize = flag.Int64("b", 1024*1024, "block size")
 	numBlocks = flag.Int("n", 10, "number of concurrent blocks")
-	cont      = flag.Bool("c", false, "continue")
-	filename  = flag.String("o", "", "output filename. the last part of the url is used if not set.")
-	urlPath   = flag.String("u", "", "url")
-	verbose   = flag.Bool("v", false, "verbose")
+	cont     = flag.Bool("c", false, "continue")
+	filename = flag.String("o", "", "output filename. the last part of the url is used if not set.")
+	urlPath  = flag.String("u", "", "url")
+	verbose  = flag.Bool("v", false, "verbose")
 
 	ur *url.URL
 )
@@ -88,6 +88,9 @@ func main() {
 
 	if err = dl.Close(); err != nil {
 		log.Fatalf("close err=%v", err)
+	}
+	if dl.committed != dl.total {
+		log.Fatalf("want=%d got=%d", dl.total, dl.committed)
 	}
 }
 
@@ -172,18 +175,23 @@ func (dl *downloader) Run() error {
 		}
 
 		dl.mu.Lock()
-		defer dl.mu.Unlock()
-
 		// serialize disk i/o
-		if m, err := dl.file.WriteAt(b[:n], start); err != nil {
-			return fmt.Errorf("write at=%d of n=%d returns m=%d err=%v", start, n, m, err)
+		if _, err = dl.file.WriteAt(b[:n], start); err != nil {
+			err = fmt.Errorf("write at=%d of n=%d err=%v", start, n, err)
 		}
-		end = start + int64(n) - 1 // actual end
 
-		dl.setTotal(total)
-		lg("%d-%d downloaded", start, end)
-		dl.copied = append(dl.copied, offsetRange{start, end})
-		dl.advanceCommit(rh)
+		if err == nil {
+			end = start + int64(n) - 1 // actual end
+			dl.setTotal(total)
+			lg("%d-%d downloaded", start, end)
+			dl.copied = append(dl.copied, offsetRange{start, end})
+			dl.advanceCommit(rh)
+		}
+		dl.mu.Unlock()
+
+		if err != nil {
+			return err
+		}
 	}
 }
 
@@ -226,7 +234,7 @@ func (dl *downloader) readBody(resp *http.Response, b []byte, rh string) (n int,
 
 	n, err = io.ReadFull(resp.Body, b)
 	resp.Body.Close()
-	lg("%s read body n=%d err=%v b=%s", rh, n, err, b[:n])
+	lg("%s read body n=%d err=%v", rh, n, err)
 	if err != nil && err != io.ErrUnexpectedEOF {
 		return 0, 0, fmt.Errorf("read body err=%v", err)
 	}
