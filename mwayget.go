@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -499,16 +500,20 @@ func parseContentRange(cr string) (start, end, total int64, err error) {
 }
 
 func parseContentDisposition(cd string) string {
-	tok := `filename="`
-	i := strings.Index(cd, tok)
-	if i < 0 {
+	_, params, err := mime.ParseMediaType(cd)
+	if err != nil {
+		log.Printf("parse content-disposition=%s err=%v", cd, err)
 		return ""
 	}
-	i += len(tok)
-	if !strings.HasSuffix(cd, `"`) {
-		return ""
+	if fn, ok := params["filename"]; ok {
+		fn2, err := url.QueryUnescape(fn)
+		if err != nil {
+			log.Printf("unescape filename=%s err=%v", fn, err)
+			return fn
+		}
+		return fn2
 	}
-	return cd[i : len(cd)-1]
+	return ""
 }
 
 func logResp(resp *http.Response) {
