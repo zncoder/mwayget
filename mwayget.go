@@ -420,7 +420,7 @@ func (dl *downloader) advance(b []byte) {
 
 	dl.off += int64(len(b))
 	fi.holes[dl.hi].Start = dl.off
-	lg("%s: advance to %d", dl.name, dl.off)
+	log.Printf("%s: advance to %d", dl.name, dl.off)
 	writeInfoBlock()
 }
 
