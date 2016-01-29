@@ -326,10 +326,23 @@ func truncateTo(sz int64) {
 	}
 }
 
+func noHoles() bool {
+	for _, h := range fi.holes {
+		if h.Start != h.End {
+			return false
+		}
+	}
+	return true
+}
+
 func finishDownload() error {
 	wip := fi.file.Name()
 	if err := fi.file.Close(); err != nil {
 		return fmt.Errorf("close wip file=%s err=%v", wip, err)
+	}
+
+	if !noHoles() {
+		return fmt.Errorf("wip: %v", fi.holes)
 	}
 
 	if err := os.Truncate(wip, fi.total); err != nil {
@@ -374,7 +387,7 @@ func (dl *downloader) Run() {
 	defer resp.Body.Close()
 	logResp(resp)
 	if (resp.StatusCode / 100) != 2 {
-		log.Printf("%s: bad resp status=%s", dl.name, resp.Status)
+		log.Printf("%s: stop because of bad resp status=%s", dl.name, resp.Status)
 		return
 	}
 
