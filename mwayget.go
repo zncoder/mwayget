@@ -22,7 +22,7 @@ import (
 
 var (
 	blockSize  = flag.Int("b", 1024*1024, "block size")
-	numWorkers = flag.Int("n", 5, "number of concurrent workers")
+	numWorkers = flag.Int("n", 1, "number of concurrent workers")
 	cont       = flag.Bool("c", false, "continue")
 	filename   = flag.String("o", "", "output filename. the last part of the url is used if not set.")
 	urlPath    = flag.String("u", "", "url")
