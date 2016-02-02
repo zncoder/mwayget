@@ -22,8 +22,8 @@ import (
 
 var (
 	blockSize  = flag.Int("b", 1024*1024, "block size")
-	numWorkers = flag.Int("n", 1, "number of concurrent workers")
-	cont       = flag.Bool("c", false, "continue")
+	numWorkers = flag.Int("n", 5, "number of concurrent workers")
+	cont       = flag.Bool("c", true, "continue")
 	filename   = flag.String("o", "", "output filename. the last part of the url is used if not set.")
 	urlPath    = flag.String("u", "", "url")
 	verbose    = flag.Bool("v", false, "verbose")
@@ -51,9 +51,10 @@ type fileInfo struct {
 }
 
 type urlInfo struct {
-	remoteName   string
-	total        int64
-	supportRange bool
+	remoteName string
+	total      int64
+	okRange    bool
+	okConcur   bool
 }
 
 var fi fileInfo
@@ -85,52 +86,88 @@ type rangeResp struct {
 	filename   string
 	start, end int64
 	total      int64
-	body       io.ReadCloser
+	err        error
 }
 
 func probeURL() error {
-	// implement HEAD with GET, which has wider support
-	req := newRequest()
-
-	// try range request first
-	rr, err := doRequest(req, 0, 1)
-	if err == nil {
-		fi.remoteName = rr.filename
-		fi.total = rr.total
-		fi.supportRange = true
-		rr.body.Close()
+	if err := probeURLRanges(); err == nil {
 		return nil
 	}
 
 	// range is not supported
-	req = newRequest()
-	rr, err = doRequest(req, -1, 0)
-	if err != nil {
-		return fmt.Errorf("probe url with simple request err=%v", err)
+	req := newRequest()
+	rr := doRequest(req, -1, 0)
+	if rr.err != nil {
+		return fmt.Errorf("probe url with simple request err=%v", rr.err)
 	}
 	fi.remoteName = rr.filename
 	fi.total = rr.total
-	fi.supportRange = false
 	return nil
 }
 
-func doRequest(req *http.Request, start, end int64) (*rangeResp, error) {
+func probeURLRanges() error {
+	var rrs [2]*rangeResp
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func(i int) {
+			defer wg.Done()
+			req := newRequest()
+			rrs[i] = doRequest(req, int64(i), int64(i+1))
+		}(i)
+	}
+	wg.Wait()
+
+	ok0 := rrs[0].err == nil
+	ok1 := rrs[1].err == nil
+	var rr *rangeResp
+	switch {
+	default:
+		return rrs[0].err
+	case ok0 && ok1:
+		rr = rrs[0]
+		fi.okConcur = true
+	case ok0:
+		rr = rrs[0]
+	case ok1:
+		rr = rrs[1]
+	}
+	fi.okRange = true
+	fi.remoteName = rr.filename
+	fi.total = rr.total
+	return nil
+}
+
+func firstErr(errs ...error) error {
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func doRequest(req *http.Request, start, end int64) *rangeResp {
 	if start >= 0 {
 		rh := fmt.Sprintf("bytes=%d-%d", start, end)
 		req.Header.Set("Range", rh)
 	}
+
+	rr := &rangeResp{}
 	resp, err := c.Do(req)
 	if err != nil {
 		// unexpected error
-		return nil, fmt.Errorf("http do err=%v", err)
+		rr.err = fmt.Errorf("http do err=%v", err)
+		return rr
 	}
+	resp.Body.Close()
 	logResp(resp)
 
 	if (resp.StatusCode / 100) != 2 {
-		return nil, fmt.Errorf("bad resp status=%s", resp.Status)
+		rr.err = fmt.Errorf("bad resp status=%s", resp.Status)
+		return rr
 	}
 
-	rr := &rangeResp{body: resp.Body}
 	if a, b, tot, err := parseContentRange(resp.Header.Get("Content-Range")); err != nil {
 		log.Printf("range request is not supported")
 		rr.start, rr.end = -1, -1
@@ -146,7 +183,8 @@ func doRequest(req *http.Request, start, end int64) (*rangeResp, error) {
 			rr.total = -1
 		}
 	} else if a != start {
-		return nil, fmt.Errorf("start of range resp want=%d got=%d", start, a)
+		rr.err = fmt.Errorf("start of range resp want=%d got=%d", start, a)
+		return rr
 	} else {
 		rr.start = a
 		rr.end = b
@@ -156,7 +194,7 @@ func doRequest(req *http.Request, start, end int64) (*rangeResp, error) {
 	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
 		rr.filename = parseContentDisposition(cd)
 	}
-	return rr, nil
+	return rr
 }
 
 func newRequest() *http.Request {
@@ -239,7 +277,7 @@ func recoverHoles() error {
 }
 
 func initHoles() {
-	if !fi.supportRange {
+	if !fi.okRange || !fi.okConcur {
 		fi.holes = append(fi.holes, Hole{0, fi.total})
 		return
 	}
@@ -375,7 +413,7 @@ func newDownloader(hi int) *downloader {
 
 func (dl *downloader) Run() {
 	req := newRequest()
-	if fi.supportRange {
+	if fi.okRange {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", dl.start, dl.end))
 	}
 
@@ -441,6 +479,9 @@ func main() {
 	flag.Parse()
 
 	var err error
+	if !strings.HasPrefix(*urlPath, "http") {
+		*urlPath = "http://" + *urlPath
+	}
 	if ur, err = url.Parse(*urlPath); err != nil {
 		log.Fatalf("invalid url=%s err=%v", *urlPath, err)
 	}
